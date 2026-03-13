@@ -1,0 +1,9 @@
+pandoc: '2.13'
+pkgdown: 2.2.0
+pkgdown_sha: ~
+articles:
+  lkparq: lkparq.html
+last_built: 2026-03-13T13:32Z
+urls:
+  reference: https://github.com/vjcitn/lkparq/reference
+  article: https://github.com/vjcitn/lkparq/articles

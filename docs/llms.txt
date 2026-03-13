@@ -1,0 +1,75 @@
+<div id="main" class="col-md-9" role="main">
+
+# lkparq: Experimental R package with a TxDb-like resource for Gencode V49 for humans
+
+<div class="section level1">
+
+This package was heavily negotiated with Claude chat Opus 4.5 extended
+in March 2026.
+
+It takes advantage of works of many people involved with Bioconductor
+packages such as
+
+-   GenomicState
+-   txdbmaker
+-   AnnotationDbi
+
+The main purpose is to expose GTF content as directly as possible using
+methods of GenomicFeatures. The back end at present is parquet.
+
+</div>
+
+</div>
+
+<div id="main" class="col-md-9" role="main">
+
+# Package index
+
+<div class="section level2">
+
+## All functions
+
+</div>
+
+<div class="section level2">
+
+-   `genome(<GTFParquet>)` `seqinfo(<GTFParquet>)` : GTFParquet class
+-   `GTFParquet()` : Create a GTFParquet object
+-   `gene_types()` `transcript_types()` : List available gene or
+    transcript types
+-   `protein_coding_genes()` `lncRNA_genes()` : Convenience functions
+    for common gene types
+-   `genes(<GTFParquet>)` `transcripts(<GTFParquet>)`
+    `exons(<GTFParquet>)` `cds(<GTFParquet>)` : Extract genomic features
+    from a GTFParquet object
+-   `gtf_metadata()` : Get GTF metadata
+-   `genes_in_region()` `transcripts_in_region()` : Find features
+    overlapping a genomic region
+-   `transcriptsBy(<GTFParquet>)` `exonsBy(<GTFParquet>)`
+    `cdsBy(<GTFParquet>)` : Extract and group genomic features from a
+    GTFParquet object
+-   `utrs()` `codons()` : Extract UTR and codon features from a
+    GTFParquet object
+
+</div>
+
+</div>
+
+<div id="main" class="col-md-9" role="main">
+
+# Articles
+
+<div class="section">
+
+### All vignettes
+
+<div class="section-desc">
+
+</div>
+
+-   [lkparq: claude-based parquet transformation of TxDb from Gencode
+    v49](https://github.com/vjcitn/lkparq/articles/lkparq.md):
+
+</div>
+
+</div>

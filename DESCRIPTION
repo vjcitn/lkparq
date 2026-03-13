@@ -1,6 +1,6 @@
 Package: lkparq
 Title: parquet for txdb
-Version: 0.0.1
+Version: 0.0.2
 Authors@R:
     person(given = "Vince",
            family = "Carey",
