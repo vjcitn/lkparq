@@ -1,2 +1,1 @@
-# lkparq
-Experimental package with a TxDb-like resource for Gencode V49 for humans
+# lkparq: Experimental R package with a TxDb-like resource for Gencode V49 for humans

@@ -1,0 +1,14 @@
+# Python dependencies for GTF/TxDb to Parquet converters
+pandas>=2.0.0
+pyarrow>=14.0.0
+
+# Strongly recommended: 10-100x faster for txdb_to_parquet.py denormalization
+duckdb>=0.9.0
+
+# R dependencies (install via install.packages or BiocManager):
+# arrow
+# dplyr
+# GenomicRanges (Bioconductor)
+# IRanges (Bioconductor)
+# S4Vectors (Bioconductor)
+# GenomeInfoDb (Bioconductor)

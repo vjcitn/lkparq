@@ -1,0 +1,717 @@
+
+# =============================================================================
+# S4 Class Definition
+# =============================================================================
+
+#' GTFParquet Class: An S4 class for accessing GTF annotations stored in Parquet format, preserving GTF attributes.
+#' @import methods
+#' @rawNamespace import(GenomicRanges, except=c(intersect,setdiff,union))
+#' @import GenomeInfoDb
+#' @import GenomicFeatures
+#' @importFrom S4Vectors mcols mcols<-
+#' @importFrom IRanges IRanges
+#' @importFrom stats setNames
+#' @import arrow
+#' @import dplyr
+#' @slot path Character. Path to the Parquet directory.
+#' @slot files List. Paths to individual Parquet files.
+#' @slot available Logical vector. Which files are present.
+#' @slot is_partitioned Logical. Whether genes are partitioned by chromosome.
+#' @slot .genome Character. Reference genome build (e.g., "GRCh38").
+#'
+#' @exportClass GTFParquet
+setClass("GTFParquet",
+  slots = c(
+    path = "character",
+    files = "list",
+    available = "logical",
+    is_partitioned = "logical",
+    .genome = "character"
+  )
+)
+
+
+#' Create a GTFParquet object
+#'
+#' @param path Path to directory containing Parquet files from gtf_to_parquet.py
+#' @return A GTFParquet S4 object
+#' @export
+#' @examples
+#' gtf <- GTFParquet(system.file("gc49", package="lkparq"))
+#' genes(gtf)
+#' genes(gtf, filter = list(gene_type = "protein_coding"))
+GTFParquet <- function(path) {
+  path <- normalizePath(path, mustWork = TRUE)
+  
+  # Check which files exist
+  files <- list(
+    genes = file.path(path, "genes.parquet"),
+    transcripts = file.path(path, "transcripts.parquet"),
+    exons = file.path(path, "exons.parquet"),
+    cds = file.path(path, "cds.parquet"),
+    features = file.path(path, "features.parquet"),
+    metadata = file.path(path, "metadata.parquet")
+  )
+  
+  available <- sapply(files, file.exists)
+  
+  # Check for partitioned genes directory
+  is_partitioned <- dir.exists(file.path(path, "genes"))
+  if (is_partitioned) {
+    files$genes <- file.path(path, "genes")
+    available["genes"] <- TRUE
+  }
+  
+  # Load genome from metadata if available
+  genome_val <- NA_character_
+  if (available[["metadata"]]) {
+    meta <- arrow::read_parquet(files$metadata)
+    meta_list <- setNames(meta$value, meta$name)
+    if ("genome" %in% names(meta_list)) {
+      genome_val <- meta_list[["genome"]]
+    }
+  }
+  
+  new("GTFParquet",
+      path = path,
+      files = files,
+      available = available,
+      is_partitioned = is_partitioned,
+      .genome = genome_val)
+}
+
+
+#' @export
+setMethod("show", "GTFParquet", function(object) {
+  cat("GTFParquet object\n")
+  cat("  Path:", object@path, "\n")
+  if (!is.na(object@.genome)) {
+    cat("  Genome:", object@.genome, "\n")
+  }
+  cat("  Available tables:\n")
+  for (name in names(object@available)) {
+    status <- if (object@available[[name]]) "[x]" else "[ ]"
+    cat(sprintf("    %s %s\n", status, name))
+  }
+  
+  # Show metadata if available
+  if (object@available[["metadata"]]) {
+    meta <- arrow::read_parquet(object@files$metadata)
+    cat("  Metadata:\n")
+    for (i in seq_len(nrow(meta))) {
+      cat(sprintf("    %s: %s\n", meta$name[i], meta$value[i]))
+    }
+  }
+})
+
+
+# =============================================================================
+# GenomeInfoDb::genome method
+# =============================================================================
+
+#' @export
+setMethod("genome", "GTFParquet", function(x) {
+  x@.genome
+})
+
+
+# =============================================================================
+# GenomicFeatures::genes method
+# =============================================================================
+
+#' Extract genes with full GTF attributes
+#'
+#' @param x A GTFParquet object
+#' @param columns Character vector of columns to include in mcols
+#' @param filter Named list for filtering (e.g., list(gene_type = "protein_coding"))
+#' @param use_versioned_ids Use full versioned IDs (default FALSE)
+#' @return GRanges with gene_id as names and full attribute mcols
+#' @export
+#' @examples
+#' gtf <- GTFParquet(system.file("gc49", package="lkparq"))
+#' gr <- genes(gtf)
+#' gr <- genes(gtf, filter = list(gene_type = "protein_coding"))
+setMethod("genes", "GTFParquet", function(x, columns = NULL, filter = NULL, 
+                                           use_versioned_ids = FALSE) {
+  if (!x@available[["genes"]]) {
+    stop("genes.parquet not found in: ", x@path)
+  }
+  
+  default_cols <- c("gene_name", "gene_type", "source", "level", "tags", "havana_gene")
+  if (is.null(columns)) {
+    columns <- default_cols
+  }
+  
+  id_col <- if (use_versioned_ids) "gene_id" else "gene_id_stripped"
+  required_cols <- c(id_col, "chrom", "start", "end", "strand")
+  select_cols <- unique(c(required_cols, columns))
+  
+  if (!is.null(filter)) {
+    select_cols <- unique(c(select_cols, names(filter)))
+  }
+  
+  ds <- arrow::open_dataset(x@files$genes)
+  query <- ds |> dplyr::select(dplyr::any_of(select_cols))
+  
+  if (!is.null(filter)) {
+    for (col_name in names(filter)) {
+      query <- query |> dplyr::filter(.data[[col_name]] %in% filter[[col_name]])
+    }
+  }
+  
+  df <- query |> dplyr::collect() |> dplyr::arrange(chrom, start)
+  
+  .df_to_granges_rich(df, id_col = id_col, mcol_cols = columns, genome = x@.genome)
+})
+
+
+# =============================================================================
+# GenomicFeatures::transcripts method
+# =============================================================================
+
+#' @export
+setMethod("transcripts", "GTFParquet", function(x, columns = NULL, filter = NULL,
+                                                 use_versioned_ids = FALSE) {
+  if (!x@available[["transcripts"]]) {
+    stop("transcripts.parquet not found in: ", x@path)
+  }
+  
+  default_cols <- c("transcript_name", "transcript_type", "gene_id", "gene_name",
+                    "source", "level", "tags", "transcript_support_level",
+                    "havana_transcript", "ccdsid", "protein_id")
+  if (is.null(columns)) {
+    columns <- default_cols
+  }
+  
+  id_col <- if (use_versioned_ids) "transcript_id" else "transcript_id_stripped"
+  required_cols <- c(id_col, "chrom", "start", "end", "strand")
+  select_cols <- unique(c(required_cols, columns))
+  
+  if (!is.null(filter)) {
+    select_cols <- unique(c(select_cols, names(filter)))
+  }
+  
+  df <- arrow::read_parquet(x@files$transcripts, col_select = dplyr::any_of(select_cols))
+  
+  if (!is.null(filter)) {
+    for (col_name in names(filter)) {
+      df <- df |> dplyr::filter(.data[[col_name]] %in% filter[[col_name]])
+    }
+  }
+  
+  df <- df |> dplyr::arrange(chrom, start)
+  
+  .df_to_granges_rich(df, id_col = id_col, mcol_cols = columns, genome = x@.genome)
+})
+
+
+# =============================================================================
+# GenomicFeatures::exons method
+# =============================================================================
+
+#' @export
+setMethod("exons", "GTFParquet", function(x, columns = NULL, filter = NULL,
+                                           use_versioned_ids = FALSE) {
+  if (!x@available[["exons"]]) {
+    stop("exons.parquet not found in: ", x@path)
+  }
+  
+  default_cols <- c("exon_number", "transcript_id", "gene_id", "source", "level", "tags")
+  if (is.null(columns)) {
+    columns <- default_cols
+  }
+  
+  id_col <- if (use_versioned_ids) "exon_id" else "exon_id_stripped"
+  required_cols <- c(id_col, "chrom", "start", "end", "strand")
+  select_cols <- unique(c(required_cols, columns))
+  
+  if (!is.null(filter)) {
+    select_cols <- unique(c(select_cols, names(filter)))
+  }
+  
+  df <- arrow::read_parquet(x@files$exons, col_select = dplyr::any_of(select_cols))
+  
+  if (!is.null(filter)) {
+    for (col_name in names(filter)) {
+      df <- df |> dplyr::filter(.data[[col_name]] %in% filter[[col_name]])
+    }
+  }
+  
+  df <- df |> dplyr::arrange(chrom, start)
+  
+  .df_to_granges_rich(df, id_col = id_col, mcol_cols = columns, genome = x@.genome)
+})
+
+
+# =============================================================================
+# GenomicFeatures::cds method
+# =============================================================================
+
+#' @export
+setMethod("cds", "GTFParquet", function(x, columns = NULL, filter = NULL) {
+  if (!x@available[["cds"]]) {
+    stop("cds.parquet not found in: ", x@path)
+  }
+  
+  default_cols <- c("transcript_id", "gene_id", "protein_id", "exon_number",
+                    "frame", "source", "level", "tags")
+  if (is.null(columns)) {
+    columns <- default_cols
+  }
+  
+  required_cols <- c("cds_id", "chrom", "start", "end", "strand")
+  select_cols <- unique(c(required_cols, columns))
+  
+  if (!is.null(filter)) {
+    select_cols <- unique(c(select_cols, names(filter)))
+  }
+  
+  df <- arrow::read_parquet(x@files$cds, col_select = dplyr::any_of(select_cols))
+  
+  if (!is.null(filter)) {
+    for (col_name in names(filter)) {
+      df <- df |> dplyr::filter(.data[[col_name]] %in% filter[[col_name]])
+    }
+  }
+  
+  df <- df |> dplyr::arrange(chrom, start)
+  
+  .df_to_granges_rich(df, id_col = "cds_id", mcol_cols = columns, genome = x@.genome)
+})
+
+
+# =============================================================================
+# GenomicFeatures::exonsBy method
+# =============================================================================
+
+#' @export
+setMethod("exonsBy", "GTFParquet", function(x, by = c("tx", "gene"), filter = NULL) {
+  by <- match.arg(by)
+  
+  if (!x@available[["exons"]]) {
+    stop("exons.parquet not found")
+  }
+  
+  group_col <- if (by == "tx") "transcript_id_stripped" else "gene_id_stripped"
+  
+  select_cols <- c("exon_id_stripped", "exon_number", "transcript_id_stripped",
+                   "gene_id_stripped", "chrom", "start", "end", "strand")
+  
+  df <- arrow::read_parquet(x@files$exons, col_select = dplyr::any_of(select_cols))
+  
+  if (!is.null(filter)) {
+    for (col_name in names(filter)) {
+      df <- df |> dplyr::filter(.data[[col_name]] %in% filter[[col_name]])
+    }
+  }
+  
+  df <- df |> dplyr::arrange(.data[[group_col]], exon_number)
+  
+  .df_to_grangeslist(df, group_col = group_col, id_col = "exon_id_stripped",
+                     mcol_cols = c("exon_number", "transcript_id_stripped", "gene_id_stripped"),
+                     genome = x@.genome)
+})
+
+
+# =============================================================================
+# GenomicFeatures::cdsBy method
+# =============================================================================
+
+#' @export
+setMethod("cdsBy", "GTFParquet", function(x, by = c("tx", "gene"), filter = NULL) {
+  by <- match.arg(by)
+  
+  if (!x@available[["cds"]]) {
+    stop("cds.parquet not found")
+  }
+  
+  group_col <- if (by == "tx") "transcript_id_stripped" else "gene_id_stripped"
+  
+  select_cols <- c("cds_id", "transcript_id_stripped", "gene_id_stripped",
+                   "protein_id", "exon_number", "frame",
+                   "chrom", "start", "end", "strand")
+  
+  df <- arrow::read_parquet(x@files$cds, col_select = dplyr::any_of(select_cols))
+  
+  if (!is.null(filter)) {
+    for (col_name in names(filter)) {
+      df <- df |> dplyr::filter(.data[[col_name]] %in% filter[[col_name]])
+    }
+  }
+  
+  df <- df |> dplyr::arrange(.data[[group_col]], exon_number)
+  
+  .df_to_grangeslist(df, group_col = group_col, id_col = "cds_id",
+                     mcol_cols = c("protein_id", "exon_number", "frame",
+                                   "transcript_id_stripped", "gene_id_stripped"),
+                     genome = x@.genome)
+})
+
+
+# =============================================================================
+# GenomicFeatures::transcriptsBy method
+# =============================================================================
+
+#' @export
+setMethod("transcriptsBy", "GTFParquet", function(x, by = "gene", filter = NULL) {
+  if (by != "gene") {
+    stop("transcriptsBy currently only supports by='gene'")
+  }
+  
+  if (!x@available[["transcripts"]]) {
+    stop("transcripts.parquet not found")
+  }
+  
+  select_cols <- c("transcript_id_stripped", "transcript_name", "transcript_type",
+                   "gene_id_stripped", "chrom", "start", "end", "strand")
+  
+  df <- arrow::read_parquet(x@files$transcripts, col_select = dplyr::any_of(select_cols))
+  
+  if (!is.null(filter)) {
+    for (col_name in names(filter)) {
+      df <- df |> dplyr::filter(.data[[col_name]] %in% filter[[col_name]])
+    }
+  }
+  
+  df <- df |> dplyr::arrange(gene_id_stripped, start)
+  
+  .df_to_grangeslist(df, group_col = "gene_id_stripped", id_col = "transcript_id_stripped",
+                     mcol_cols = c("transcript_name", "transcript_type"),
+                     genome = x@.genome)
+})
+
+
+# =============================================================================
+# GenomicFeatures::seqinfo method
+# =============================================================================
+
+#' @export
+setMethod("seqinfo", "GTFParquet", function(x) {
+  # Build seqinfo from genes table
+  if (x@available[["genes"]]) {
+    ds <- arrow::open_dataset(x@files$genes)
+    chroms <- ds |>
+      dplyr::select(chrom) |>
+      dplyr::distinct() |>
+      dplyr::collect() |>
+      dplyr::pull(chrom) |>
+      sort()
+  } else if (x@available[["transcripts"]]) {
+    df <- arrow::read_parquet(x@files$transcripts, col_select = "chrom")
+    chroms <- sort(unique(df$chrom))
+  } else {
+    return(Seqinfo())
+  }
+  
+  si <- Seqinfo(seqnames = chroms)
+  if (!is.na(x@.genome)) {
+    genome(si) <- x@.genome
+  }
+  si
+})
+
+
+# =============================================================================
+# Feature Type Queries (custom generics)
+# =============================================================================
+
+#' Extract UTR regions
+#'
+#' @param x A GTFParquet object
+#' @param type "5prime", "3prime", or "both"
+#' @param filter Named list for filtering
+#' @return GRanges
+#' @export
+setGeneric("utrs", function(x, type = "both", filter = NULL) standardGeneric("utrs"))
+
+#' @export
+setMethod("utrs", "GTFParquet", function(x, type = c("both", "5prime", "3prime"), 
+                                          filter = NULL) {
+  type <- match.arg(type)
+  
+  if (!x@available[["features"]]) {
+    stop("features.parquet not found - no UTR data available")
+  }
+  
+  df <- arrow::read_parquet(x@files$features)
+  
+  utr_types <- switch(type,
+    "5prime" = c("five_prime_utr", "UTR"),
+    "3prime" = c("three_prime_utr"),
+    "both" = c("five_prime_utr", "three_prime_utr", "UTR")
+  )
+  
+  df <- df |> dplyr::filter(feature_type %in% utr_types)
+  
+  if (!is.null(filter)) {
+    for (col_name in names(filter)) {
+      df <- df |> dplyr::filter(.data[[col_name]] %in% filter[[col_name]])
+    }
+  }
+  
+  if (nrow(df) == 0) {
+    return(GRanges())
+  }
+  
+  gr <- GRanges(
+    seqnames = df$chrom,
+    ranges = IRanges(start = df$start, end = df$end),
+    strand = df$strand
+  )
+  
+  S4Vectors::mcols(gr) <- df[, c("feature_type", "transcript_id", "gene_id"), drop = FALSE]
+  
+  if (!is.na(x@.genome)) {
+    si <- seqinfo(gr)
+    genome(si) <- x@.genome
+    seqinfo(gr) <- si
+  }
+  
+  gr
+})
+
+
+#' Extract start/stop codons
+#'
+#' @param x A GTFParquet object
+#' @param type "start", "stop", or "both"
+#' @param filter Named list for filtering
+#' @return GRanges
+#' @export
+setGeneric("codons", function(x, type = "both", filter = NULL) standardGeneric("codons"))
+
+#' @export
+setMethod("codons", "GTFParquet", function(x, type = c("both", "start", "stop"),
+                                            filter = NULL) {
+  type <- match.arg(type)
+  
+  if (!x@available[["features"]]) {
+    stop("features.parquet not found")
+  }
+  
+  df <- arrow::read_parquet(x@files$features)
+  
+  codon_types <- switch(type,
+    "start" = "start_codon",
+    "stop" = "stop_codon",
+    "both" = c("start_codon", "stop_codon")
+  )
+  
+  df <- df |> dplyr::filter(feature_type %in% codon_types)
+  
+  if (!is.null(filter)) {
+    for (col_name in names(filter)) {
+      df <- df |> dplyr::filter(.data[[col_name]] %in% filter[[col_name]])
+    }
+  }
+  
+  if (nrow(df) == 0) {
+    return(GRanges())
+  }
+  
+  gr <- GRanges(
+    seqnames = df$chrom,
+    ranges = IRanges(start = df$start, end = df$end),
+    strand = df$strand
+  )
+  
+  S4Vectors::mcols(gr) <- df[, c("feature_type", "transcript_id", "gene_id", "frame"), drop = FALSE]
+  
+  if (!is.na(x@.genome)) {
+    si <- seqinfo(gr)
+    genome(si) <- x@.genome
+    seqinfo(gr) <- si
+  }
+  
+  gr
+})
+
+
+# =============================================================================
+# Convenience Functions
+# =============================================================================
+
+#' Get protein-coding genes
+#'
+#' @param x A GTFParquet object
+#' @param ... Additional arguments passed to genes()
+#' @return GRanges of protein-coding genes
+#' @export
+protein_coding_genes <- function(x, ...) {
+  genes(x, filter = list(gene_type = "protein_coding"), ...)
+}
+
+
+#' Get lncRNA genes
+#'
+#' @param x A GTFParquet object
+#' @param ... Additional arguments passed to genes()
+#' @return GRanges of lncRNA genes
+#' @export
+lncRNA_genes <- function(x, ...) {
+  genes(x, filter = list(gene_type = "lncRNA"), ...)
+}
+
+
+#' List available gene types
+#'
+#' @param x A GTFParquet object
+#' @return Table of gene types with counts
+#' @export
+gene_types <- function(x) {
+  if (!x@available[["genes"]]) {
+    stop("genes.parquet not found")
+  }
+  
+  ds <- arrow::open_dataset(x@files$genes)
+  df <- ds |> dplyr::select(gene_type) |> dplyr::collect()
+  table(df$gene_type, useNA = "ifany")
+}
+
+
+#' List available transcript types
+#'
+#' @param x A GTFParquet object
+#' @return Table of transcript types with counts
+#' @export
+transcript_types <- function(x) {
+  if (!x@available[["transcripts"]]) {
+    stop("transcripts.parquet not found")
+  }
+  
+  df <- arrow::read_parquet(x@files$transcripts, col_select = "transcript_type")
+  table(df$transcript_type, useNA = "ifany")
+}
+
+
+#' Get GTF metadata
+#'
+#' @param x A GTFParquet object
+#' @return Named character vector of metadata
+#' @export
+gtf_metadata <- function(x) {
+  if (!x@available[["metadata"]]) {
+    return(character(0))
+  }
+  
+  meta <- arrow::read_parquet(x@files$metadata)
+  setNames(meta$value, meta$name)
+}
+
+
+# =============================================================================
+# Region Queries
+# =============================================================================
+
+#' Find genes overlapping a genomic region
+#'
+#' @param x A GTFParquet object
+#' @param region GRanges specifying query region(s)
+#' @param ... Additional arguments passed to genes()
+#' @return GRanges of genes overlapping the region
+#' @export
+genes_in_region <- function(x, region, ...) {
+  stopifnot(inherits(region, "GRanges"))
+  
+  chroms <- as.character(unique(seqnames(region)))
+  all_genes <- genes(x, filter = list(chrom = chroms), ...)
+  
+  hits <- findOverlaps(all_genes, region)
+  all_genes[queryHits(hits)]
+}
+
+
+#' Find transcripts overlapping a genomic region
+#'
+#' @param x A GTFParquet object
+#' @param region GRanges specifying query region(s)
+#' @param ... Additional arguments passed to transcripts()
+#' @return GRanges of transcripts overlapping the region
+#' @export
+transcripts_in_region <- function(x, region, ...) {
+  stopifnot(inherits(region, "GRanges"))
+  
+  chroms <- as.character(unique(seqnames(region)))
+  all_tx <- transcripts(x, filter = list(chrom = chroms), ...)
+  
+  hits <- findOverlaps(all_tx, region)
+  all_tx[queryHits(hits)]
+}
+
+
+# =============================================================================
+# Internal Helper Functions
+# =============================================================================
+
+#' Convert data frame to GRanges with rich metadata
+#' @keywords internal
+.df_to_granges_rich <- function(df, id_col, mcol_cols, genome = NA_character_) {
+  if (nrow(df) == 0) {
+    return(GRanges())
+  }
+  
+  gr <- GRanges(
+    seqnames = df$chrom,
+    ranges = IRanges(start = df$start, end = df$end),
+    strand = df$strand
+  )
+  
+  names(gr) <- df[[id_col]]
+  
+  exclude_cols <- c(id_col, "chrom", "start", "end", "strand")
+  mcol_cols_available <- intersect(mcol_cols, colnames(df))
+  mcol_cols_available <- setdiff(mcol_cols_available, exclude_cols)
+  
+  if (length(mcol_cols_available) > 0) {
+    S4Vectors::mcols(gr) <- df[, mcol_cols_available, drop = FALSE]
+  }
+  
+  if (!is.na(genome)) {
+    si <- seqinfo(gr)
+    genome(si) <- genome
+    seqinfo(gr) <- si
+  }
+  
+  gr
+}
+
+
+#' Build GRangesList efficiently from pre-sorted data frame
+#' @keywords internal
+.df_to_grangeslist <- function(df, group_col, id_col, mcol_cols = NULL, 
+                                genome = NA_character_) {
+  if (nrow(df) == 0) {
+    return(GRangesList())
+  }
+  
+  groups <- df[[group_col]]
+  
+  gr <- GRanges(
+    seqnames = df$chrom,
+    ranges = IRanges(start = df$start, end = df$end),
+    strand = df$strand
+  )
+  
+  if (id_col %in% colnames(df)) {
+    names(gr) <- df[[id_col]]
+  }
+  
+  exclude_cols <- c(group_col, id_col, "chrom", "start", "end", "strand")
+  mcol_cols_available <- intersect(mcol_cols, colnames(df))
+  mcol_cols_available <- setdiff(mcol_cols_available, exclude_cols)
+  
+  if (length(mcol_cols_available) > 0) {
+    S4Vectors::mcols(gr) <- df[, mcol_cols_available, drop = FALSE]
+  }
+  
+  if (!is.na(genome)) {
+    si <- seqinfo(gr)
+    genome(si) <- genome
+    seqinfo(gr) <- si
+  }
+  
+  group_factor <- factor(groups, levels = unique(groups))
+  grl <- S4Vectors::splitAsList(gr, group_factor)
+  
+  grl
+}
